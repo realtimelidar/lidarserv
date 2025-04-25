@@ -1,16 +1,17 @@
-use std::io::{Cursor, ErrorKind};
+use std::io::{Cursor, ErrorKind, Read};
 use std::net::SocketAddr;
 
 use bytes::{Buf, BytesMut};
 use lidarserv_common::tracy_client::span;
 use log::trace;
+use log::info;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast::Receiver;
 
-use crate::net::protocol::messages::Header;
+use crate::net::protocol::messages::{DeviceType, Header};
 use crate::net::LidarServerError;
 
 use super::messages::Message;
@@ -19,6 +20,8 @@ pub struct Connection<Stream> {
     stream: Stream,
     peer_addr: SocketAddr,
     buffer: BytesMut,
+
+    pub dev_type: Option<DeviceType>,
 }
 
 const HEADER_SIZE: usize = 8;
@@ -45,6 +48,8 @@ where
             stream,
             peer_addr,
             buffer: BytesMut::new(),
+
+            dev_type: None
         };
         con.write_magic_number().await?;
         con.read_magic_number(shutdown).await?;
@@ -100,16 +105,28 @@ where
         }
         let mut data = &self.buffer[HEADER_SIZE..len];
 
+        let message: Result<Header, _> = match self.dev_type {
+            Some(DeviceType::CaptureDevice) | None => {
+                ciborium::de::from_reader(&mut data)
+                    .map_err(|e| LidarServerError::WireProtocol(Box::new(e)))
+            },
+
+            Some(DeviceType::Viewer) => {
+                serde_json::from_reader(&mut data).map_err(|e| LidarServerError::WireProtocol(Box::new(e)))
+            }
+        };
+
         // parse cbor message
-        let message: Result<Header, _> = ciborium::de::from_reader(&mut data)
-            .map_err(|e| LidarServerError::WireProtocol(Box::new(e)));
+        // let message: Result<Header, _> = ciborium::de::from_reader(&mut data)
+        //     .map_err(|e| LidarServerError::WireProtocol(Box::new(e)));
+        // let message: Result<Header, _> = serde_json::from_reader(&mut data).map_err(|e| LidarServerError::WireProtocol(Box::new(e)));
         let payload = data.to_vec();
 
         // pop message of the buffer
         self.buffer.advance(len);
 
         // treat any message of type [Message::Error] as an error.
-        trace!("{}: Receive message: {:?}", &self.peer_addr, &message);
+        info!("{}: Receive message: {:?}", &self.peer_addr, &message);
         if let Ok(Header::Error { message }) = message {
             Some(Err(LidarServerError::PeerError(message)))
         } else {
@@ -181,6 +198,7 @@ where
 
         let _s2 = span!("Connection::write_message encode");
         let mut data = Vec::new();
+        let header_len: usize;
         {
             let mut writer = Cursor::new(&mut data);
 
@@ -189,9 +207,28 @@ where
             std::io::Write::write_all(&mut writer, &empty_header[..])?;
 
             // serialize data
-            ciborium::ser::into_writer(header, &mut writer)
-                .map_err(|e| LidarServerError::WireProtocol(Box::new(e)))?;
+            match self.dev_type {
+                Some(DeviceType::CaptureDevice) | None => {
+                    ciborium::ser::into_writer(header, &mut writer)
+                        .map_err(|e| LidarServerError::WireProtocol(Box::new(e)))?;
+                    header_len = 0;
+                },
+    
+                Some(DeviceType::Viewer) => {
+                    serde_json::to_writer(&mut writer, header).map_err(|e| LidarServerError::WireProtocol(Box::new(e)))?;
+                    header_len = writer.position() as usize - 8;
+                }
+            };
+
             std::io::Write::write_all(&mut writer, payload)?;
+        }
+
+        if let Some(DeviceType::Viewer) = self.dev_type {
+            if header_len > 0 {
+                let v = data.to_vec();
+                let str = std::str::from_utf8(&v[8..header_len+8]).expect("could not cast to utf8");
+                println!("JSON Content: {}", str);
+            }
         }
 
         // overwrite header with actual message size
@@ -216,11 +253,13 @@ impl Connection<TcpStream> {
                 stream: read_half,
                 peer_addr: self.peer_addr,
                 buffer: self.buffer,
+                dev_type: self.dev_type.clone(),
             },
             Connection {
                 stream: write_half,
                 peer_addr: self.peer_addr,
                 buffer: Default::default(),
+                dev_type: self.dev_type.clone(),
             },
         )
     }

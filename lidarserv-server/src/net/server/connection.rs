@@ -71,9 +71,15 @@ pub async fn handle_connection(
     if let Header::ConnectionMode { device } = msg.header {
         match device {
             DeviceType::Viewer => {
+                con.dev_type = Some(DeviceType::Viewer);
+                info!("Connection type is Viewer");
+
                 viewer_mode(con, index, shutdown, codec, addr).await?;
             }
             DeviceType::CaptureDevice => {
+                con.dev_type = Some(DeviceType::CaptureDevice);
+                info!("Connection type is CaptureDevice");
+
                 capture_device_mode(con, index, codec, shutdown).await?;
             }
         }

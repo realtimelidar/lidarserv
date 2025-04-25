@@ -196,6 +196,9 @@ impl ViewerClient {
                 ));
             }
         };
+        
+        connection.dev_type = Some(DeviceType::Viewer);
+
         let point_layout = PointLayout::from_attributes(&attributes);
 
         let (con_read, con_write) = connection.into_split();
