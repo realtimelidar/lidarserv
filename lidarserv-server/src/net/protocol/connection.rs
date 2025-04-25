@@ -7,12 +7,12 @@ use log::trace;
 use log::info;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::broadcast::Receiver;
 
-use crate::net::protocol::messages::{DeviceType, Header};
 use crate::net::LidarServerError;
+use crate::net::protocol::messages::{DeviceType, Header};
 
 use super::messages::Message;
 
@@ -126,11 +126,10 @@ where
         self.buffer.advance(len);
 
         // treat any message of type [Message::Error] as an error.
-        info!("{}: Receive message: {:?}", &self.peer_addr, &message);
-        if let Ok(Header::Error { message }) = message {
-            Some(Err(LidarServerError::PeerError(message)))
-        } else {
-            Some(message.map(|m| Message { header: m, payload }))
+        trace!("{}: Receive message: {:?}", &self.peer_addr, &message);
+        match message {
+            Ok(Header::Error { message }) => Some(Err(LidarServerError::PeerError(message))),
+            _ => Some(message.map(|m| Message { header: m, payload })),
         }
     }
 
@@ -169,13 +168,12 @@ where
         &mut self,
         shutdown: &mut Receiver<()>,
     ) -> Result<Message, LidarServerError> {
-        if let Some(msg) = self.read_message_or_eof(shutdown).await? {
-            Ok(msg)
-        } else {
-            Err(LidarServerError::Protocol(format!(
+        match self.read_message_or_eof(shutdown).await? {
+            Some(msg) => Ok(msg),
+            _ => Err(LidarServerError::Protocol(format!(
                 "{}",
                 ConnectionClosedError
-            )))
+            ))),
         }
     }
 }

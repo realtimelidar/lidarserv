@@ -1,8 +1,8 @@
 use super::{
+    Inner,
     lazy_node::LazyNode,
     live_metrics_collector::{LiveMetricsCollector, MetricName},
     priority_function::TaskPriorityFunction,
-    Inner,
 };
 use crate::{
     geometry::{
@@ -18,7 +18,7 @@ use pasture_core::containers::{
     BorrowedBuffer, BorrowedBufferExt, InterleavedBuffer, OwningBuffer, VectorBuffer,
 };
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -133,10 +133,7 @@ impl Inboxes {
             .max_by(|&(cell_a, a), &(cell_b, b)| self.priority_function.cmp(cell_a, a, cell_b, b))
             .map(|(&id, _)| id);
 
-        let node_id = match node_id {
-            None => return None,
-            Some(i) => i,
-        };
+        let node_id = node_id?;
         let task = self.tasks.remove(&node_id).unwrap();
         self.locked.insert(
             node_id,
@@ -577,6 +574,10 @@ impl OctreeWriter {
     pub fn nr_points_waiting(&self) -> usize {
         let lock = self.inboxes.lock().unwrap();
         lock.nr_of_points()
+    }
+
+    pub fn nr_nodes_waiting(&self) -> usize {
+        self.inboxes.lock().unwrap().tasks.len()
     }
 }
 

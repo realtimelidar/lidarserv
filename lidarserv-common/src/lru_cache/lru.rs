@@ -1,4 +1,4 @@
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, hash_map};
 use std::hash::Hash;
 use std::{mem, ptr};
 
@@ -54,31 +54,33 @@ where
     ///     point to the entry itself.
     ///  - The insert_before key refer to an entry, that exist in self.entries.
     unsafe fn raw_list_insert(&mut self, ptr_entry: *mut Entry<K, V>, insert_before: Option<&K>) {
-        let Self {
-            entries,
-            first,
-            last,
-        } = self;
+        unsafe {
+            let Self {
+                entries,
+                first,
+                last,
+            } = self;
 
-        // need to use pointers / unsafe, because we hold multiple mutable references
-        // into the entries hashmap.
-        // This is safe though, because we do not add/remove entries, so the pointers stay valid.
+            // need to use pointers / unsafe, because we hold multiple mutable references
+            // into the entries hashmap.
+            // This is safe though, because we do not add/remove entries, so the pointers stay valid.
 
-        // get pointers to all relevant prev/next fields in the linked list
-        let ptr_entry_next = &mut (*ptr_entry).next as *mut Option<K>;
-        let ptr_entry_prev = &mut (*ptr_entry).prev as *mut Option<K>;
-        let ptr_next_prev = match insert_before {
-            None => last as *mut Option<K>,
-            Some(k) => &mut entries.get_mut(k).unwrap().prev as *mut Option<K>,
-        };
-        let ptr_prev_next = match &*ptr_next_prev {
-            None => first as *mut Option<K>,
-            Some(k) => &mut entries.get_mut(k).unwrap().next as *mut Option<K>,
-        };
+            // get pointers to all relevant prev/next fields in the linked list
+            let ptr_entry_next = &mut (*ptr_entry).next as *mut Option<K>;
+            let ptr_entry_prev = &mut (*ptr_entry).prev as *mut Option<K>;
+            let ptr_next_prev = match insert_before {
+                None => last as *mut Option<K>,
+                Some(k) => &mut entries.get_mut(k).unwrap().prev as *mut Option<K>,
+            };
+            let ptr_prev_next = match &*ptr_next_prev {
+                None => first as *mut Option<K>,
+                Some(k) => &mut entries.get_mut(k).unwrap().next as *mut Option<K>,
+            };
 
-        // insert into list
-        ptr::swap(ptr_entry_next, ptr_prev_next);
-        ptr::swap(ptr_entry_prev, ptr_next_prev);
+            // insert into list
+            ptr::swap(ptr_entry_next, ptr_prev_next);
+            ptr::swap(ptr_entry_prev, ptr_next_prev);
+        }
     }
 
     /// Removes an element from the linked list of entries.
@@ -94,23 +96,25 @@ where
     ///  - The next / previous keys of the pointed-to entry need to refer
     ///    to existing items in self.entries.
     unsafe fn raw_list_remove(&mut self, ptr_entry: *mut Entry<K, V>) {
-        // need to use pointers / unsafe, because we hold multiple mutable references
-        // into the entries hashmap.
-        // This is safe though, because we do not
-        // add/remove entries, so the pointers stay valid.
+        unsafe {
+            // need to use pointers / unsafe, because we hold multiple mutable references
+            // into the entries hashmap.
+            // This is safe though, because we do not
+            // add/remove entries, so the pointers stay valid.
 
-        let ptr_entry_next = &mut (*ptr_entry).next as *mut Option<K>;
-        let ptr_entry_prev = &mut (*ptr_entry).prev as *mut Option<K>;
-        let ptr_next_prev = match &*ptr_entry_next {
-            None => &mut self.last as *mut Option<K>,
-            Some(k) => &mut self.entries.get_mut(k).unwrap().prev as *mut Option<K>,
-        };
-        let ptr_prev_next = match &*ptr_entry_prev {
-            None => &mut self.first as *mut Option<K>,
-            Some(k) => &mut self.entries.get_mut(k).unwrap().next as *mut Option<K>,
-        };
-        ptr::swap(ptr_entry_next, ptr_prev_next);
-        ptr::swap(ptr_entry_prev, ptr_next_prev);
+            let ptr_entry_next = &mut (*ptr_entry).next as *mut Option<K>;
+            let ptr_entry_prev = &mut (*ptr_entry).prev as *mut Option<K>;
+            let ptr_next_prev = match &*ptr_entry_next {
+                None => &mut self.last as *mut Option<K>,
+                Some(k) => &mut self.entries.get_mut(k).unwrap().prev as *mut Option<K>,
+            };
+            let ptr_prev_next = match &*ptr_entry_prev {
+                None => &mut self.first as *mut Option<K>,
+                Some(k) => &mut self.entries.get_mut(k).unwrap().next as *mut Option<K>,
+            };
+            ptr::swap(ptr_entry_next, ptr_prev_next);
+            ptr::swap(ptr_entry_prev, ptr_next_prev);
+        }
     }
 
     /// Inserts a new item into the Lru.
@@ -166,10 +170,7 @@ where
     /// reference to its value.
     pub fn touch(&mut self, key: &K) -> Option<&mut V> {
         // get the entry
-        let ref_entry = match self.entries.get_mut(key) {
-            None => return None,
-            Some(r) => r,
-        };
+        let ref_entry = self.entries.get_mut(key)?;
 
         unsafe {
             // remove from its old position in the linked list
@@ -189,10 +190,7 @@ where
     /// Removes the entry with the given key and returns the value, that it stored.
     pub fn remove(&mut self, key: &K) -> Option<V> {
         // remove from hashmap
-        let mut entry = match self.entries.remove(key) {
-            None => return None,
-            Some(e) => e,
-        };
+        let mut entry = self.entries.remove(key)?;
 
         // remove from linked list
         unsafe {

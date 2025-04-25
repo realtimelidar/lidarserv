@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     slice,
 };
 
@@ -178,10 +178,12 @@ unsafe fn pasture_two_references<'a>(
     i1: usize,
     i2: usize,
 ) -> (&'a mut [u8], &'a mut [u8]) {
-    debug_assert_ne!(i1, i2);
-    let ptr1 = points.get_point_mut(i1) as *mut [u8];
-    let ptr2 = points.get_point_mut(i2) as *mut [u8];
-    (&mut *ptr1, &mut *ptr2)
+    unsafe {
+        debug_assert_ne!(i1, i2);
+        let ptr1 = points.get_point_mut(i1) as *mut [u8];
+        let ptr2 = points.get_point_mut(i2) as *mut [u8];
+        (&mut *ptr1, &mut *ptr2)
+    }
 }
 
 impl<C: Component> Sampling for GridCenterSampling<C> {

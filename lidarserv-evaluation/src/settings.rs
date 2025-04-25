@@ -8,9 +8,9 @@ use lidarserv_common::index::priority_function::TaskPriorityFunction;
 use log::warn;
 use nalgebra::vector;
 use pasture_core::layout::{PointAttributeDataType, PointAttributeDefinition, PointLayout};
-use pasture_io::las::{point_layout_from_las_point_format, ATTRIBUTE_LOCAL_LAS_POSITION};
+use pasture_io::las::{ATTRIBUTE_LOCAL_LAS_POSITION, point_layout_from_las_point_format};
 use pasture_io::las_rs::point::Format;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, Visitor};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ pub struct EvaluationScript {
     pub defaults: EvaluationRunDefaults,
 
     #[serde(default)]
-    pub runs: HashMap<String, ElevationRun>,
+    pub runs: IndexMap<String, ElevationRun>,
 }
 
 impl Default for EvaluationScript {
@@ -353,7 +353,24 @@ pub struct EvaluationRunDefaults {
     pub index: SingleIndex,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+pub enum EnabledAttributeIndexes {
+    #[default]
+    All,
+    RangeIndexOnly,
+    SfcIndexOnly,
+    None,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+pub enum QueryFiltering {
+    NodeFiltering,
+    NodeFilteringWithoutAttributeIndex,
+    #[default]
+    PointFiltering,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SingleIndex {
     pub node_hierarchy: i16,
@@ -364,8 +381,8 @@ pub struct SingleIndex {
     pub compression: bool,
     pub nr_bogus_points: (usize, usize),
     pub max_lod: u8,
-    pub enable_attribute_index: bool,
-    pub enable_point_filtering: bool,
+    pub enable_attribute_index: EnabledAttributeIndexes,
+    pub enable_point_filtering: QueryFiltering,
 }
 
 impl Default for SingleIndex {
@@ -402,6 +419,31 @@ impl Default for SingleIndex {
     }
 }
 
+impl SingleIndex {
+    pub fn needs_reindexing(&self, other: &Self) -> bool {
+        let defaults = SingleIndex::default();
+
+        // reset attributes, that dont influence the
+        // indexing result, so that the index is only recreated,
+        // when something changes that actually influences the indexing result
+        let me = SingleIndex {
+            priority_function: defaults.priority_function,
+            num_threads: defaults.num_threads,
+            cache_size: defaults.cache_size,
+            enable_point_filtering: defaults.enable_point_filtering,
+            ..*self
+        };
+        let other = SingleIndex {
+            priority_function: defaults.priority_function,
+            num_threads: defaults.num_threads,
+            cache_size: defaults.cache_size,
+            enable_point_filtering: defaults.enable_point_filtering,
+            ..*other
+        };
+        me != other
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MultiIndex {
@@ -413,12 +455,12 @@ pub struct MultiIndex {
     pub compression: Option<Vec<bool>>,
     pub nr_bogus_points: Option<Vec<(usize, usize)>>,
     pub max_lod: Option<Vec<u8>>,
-    pub enable_attribute_index: Option<Vec<bool>>,
-    pub enable_point_filtering: Option<Vec<bool>>,
+    pub enable_attribute_index: Option<Vec<EnabledAttributeIndexes>>,
+    pub enable_point_filtering: Option<Vec<QueryFiltering>>,
 }
 
 macro_rules! apply_default_vec {
-    ($self:ident.$i:ident <- $def:expr) => {
+    ($self:ident.$i:ident <- $def:expr_2021) => {
         if $self.$i.is_none() {
             $self.$i = Some(vec![$def.$i])
         }
@@ -461,26 +503,26 @@ impl<'a> IntoIterator for &'a MultiIndex {
         let iter = iproduct!(
             expect(&self.node_hierarchy),
             expect(&self.point_hierarchy),
-            expect(&self.priority_function),
-            expect(&self.num_threads),
-            expect(&self.cache_size),
             expect(&self.compression),
             expect(&self.nr_bogus_points),
             expect(&self.max_lod),
             expect(&self.enable_attribute_index),
+            expect(&self.priority_function),
+            expect(&self.num_threads),
+            expect(&self.cache_size),
             expect(&self.enable_point_filtering),
         )
         .map(
             |(
                 &node_hierarchy,
                 &point_hierarchy,
-                &priority_function,
-                &num_threads,
-                &cache_size,
                 &compression,
                 &nr_bogus_points,
                 &max_lod,
                 &enable_attribute_index,
+                &priority_function,
+                &num_threads,
+                &cache_size,
                 &enable_point_filtering,
             )| SingleIndex {
                 node_hierarchy,
@@ -497,5 +539,148 @@ impl<'a> IntoIterator for &'a MultiIndex {
         );
 
         Box::new(iter)
+    }
+}
+
+const STR_ALL: &str = "All";
+const STR_RANGE_INDEX_ONLY: &str = "RangeIndexOnly";
+const STR_SFC_INDEX_ONLY: &str = "SfcIndexOnly";
+const STR_NONE: &str = "None";
+
+impl Serialize for EnabledAttributeIndexes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            EnabledAttributeIndexes::All => serializer.serialize_str(STR_ALL),
+            EnabledAttributeIndexes::RangeIndexOnly => {
+                serializer.serialize_str(STR_RANGE_INDEX_ONLY)
+            }
+            EnabledAttributeIndexes::SfcIndexOnly => serializer.serialize_str(STR_SFC_INDEX_ONLY),
+            EnabledAttributeIndexes::None => serializer.serialize_str(STR_NONE),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EnabledAttributeIndexes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct AttrIndexVisitor;
+
+        impl Visitor<'_> for AttrIndexVisitor {
+            type Value = EnabledAttributeIndexes;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(
+                    formatter,
+                    "a boolean value, or one of the strings '{STR_ALL}', \
+                    '{STR_RANGE_INDEX_ONLY}', '{STR_SFC_INDEX_ONLY}', '{STR_NONE}'"
+                )
+            }
+
+            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if s.eq_ignore_ascii_case(STR_ALL) {
+                    Ok(EnabledAttributeIndexes::All)
+                } else if s.eq_ignore_ascii_case(STR_NONE) {
+                    Ok(EnabledAttributeIndexes::None)
+                } else if s.eq_ignore_ascii_case(STR_RANGE_INDEX_ONLY) {
+                    Ok(EnabledAttributeIndexes::RangeIndexOnly)
+                } else if s.eq_ignore_ascii_case(STR_SFC_INDEX_ONLY) {
+                    Ok(EnabledAttributeIndexes::SfcIndexOnly)
+                } else {
+                    Err(serde::de::Error::invalid_value(
+                        serde::de::Unexpected::Str(s),
+                        &self,
+                    ))
+                }
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if v {
+                    Ok(EnabledAttributeIndexes::All)
+                } else {
+                    Ok(EnabledAttributeIndexes::None)
+                }
+            }
+        }
+        deserializer.deserialize_any(AttrIndexVisitor)
+    }
+}
+
+const STR_NODE_FILTERING: &str = "NodeFiltering";
+const STR_POINT_FILTERING: &str = "PointFiltering";
+const STR_WITHOUT_ATTRIBUTE_INDEX: &str = "NodeFilteringWithoutAttributeIndex";
+
+impl Serialize for QueryFiltering {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let string = match self {
+            QueryFiltering::NodeFiltering => STR_NODE_FILTERING,
+            QueryFiltering::NodeFilteringWithoutAttributeIndex => STR_WITHOUT_ATTRIBUTE_INDEX,
+            QueryFiltering::PointFiltering => STR_POINT_FILTERING,
+        };
+        serializer.serialize_str(string)
+    }
+}
+
+impl<'a> Deserialize<'a> for QueryFiltering {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        struct QueryFilteringVisitor;
+
+        impl Visitor<'_> for QueryFilteringVisitor {
+            type Value = QueryFiltering;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(
+                    formatter,
+                    "a boolean value or one of the strings '{STR_NODE_FILTERING}', \
+                    '{STR_POINT_FILTERING}', '{STR_WITHOUT_ATTRIBUTE_INDEX}'"
+                )
+            }
+
+            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if s.eq_ignore_ascii_case(STR_POINT_FILTERING) {
+                    Ok(QueryFiltering::PointFiltering)
+                } else if s.eq_ignore_ascii_case(STR_NODE_FILTERING) {
+                    Ok(QueryFiltering::NodeFiltering)
+                } else if s.eq_ignore_ascii_case(STR_WITHOUT_ATTRIBUTE_INDEX) {
+                    Ok(QueryFiltering::NodeFilteringWithoutAttributeIndex)
+                } else {
+                    Err(serde::de::Error::invalid_value(
+                        serde::de::Unexpected::Str(s),
+                        &self,
+                    ))
+                }
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match v {
+                    true => Ok(QueryFiltering::PointFiltering),
+                    false => Ok(QueryFiltering::NodeFiltering),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(QueryFilteringVisitor)
     }
 }

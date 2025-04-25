@@ -1,10 +1,9 @@
 use crate::renderer::error::{RendererError, RendererResult};
 use crate::renderer::viewer::private::RenderThreadHandle;
-use derivative::Derivative;
 use pasture_core::containers::{BorrowedBuffer, BorrowedBufferExt};
 use pasture_core::layout::{PointAttributeDataType, PointAttributeDefinition, PrimitiveType};
 use pasture_core::nalgebra::Vector3;
-use std::fmt::Formatter;
+use std::fmt::{Debug, Formatter};
 
 /// Extracts the data for one point attribute from the point buffer
 /// and converts it to the vertex data of an appropriate type for the attribute type, that is
@@ -70,29 +69,41 @@ fn point_attribute_to_vertex_data_type(
     vertex_buffer_data_type: VertexDataType,
 ) -> VertexData {
     match (attribute.datatype(), vertex_buffer_data_type) {
+        (PointAttributeDataType::Vec3f32, VertexDataType::Vec3F32) => VertexData::Vec3F32(
+            get_point_attribute_vertex_data(points, attribute, |v: Vector3<f32>| {
+                Vec3F32Attribute::new(v.x, v.y, v.z)
+            }),
+        ),
 
-        (PointAttributeDataType::Vec3f32, VertexDataType::Vec3F32) =>
-            VertexData::Vec3F32(
-                get_point_attribute_vertex_data(points, attribute, |v: Vector3<f32>| Vec3F32Attribute::new(v.x, v.y, v.z))
-            ),
-
-        (PointAttributeDataType::Vec3f64, VertexDataType::Vec3F32) =>
-            VertexData::Vec3F32(
-                get_point_attribute_vertex_data(points, attribute, |v: Vector3<f64>| Vec3F32Attribute::new(v.x as f32, v.y as f32, v.z as f32))
-            ),
+        (PointAttributeDataType::Vec3f64, VertexDataType::Vec3F32) => VertexData::Vec3F32(
+            get_point_attribute_vertex_data(points, attribute, |v: Vector3<f64>| {
+                Vec3F32Attribute::new(v.x as f32, v.y as f32, v.z as f32)
+            }),
+        ),
 
         (PointAttributeDataType::Vec3f64, VertexDataType::Vec3F32Transform) => {
-
             // calculate the bounds of the values
             let mut min = Vector3::new(f64::MAX, f64::MAX, f64::MAX);
             let mut max = Vector3::new(f64::MIN, f64::MIN, f64::MIN);
             for attr in points.view_attribute::<Vector3<f64>>(attribute) {
-                if attr.x < min.x {min.x = attr.x}
-                if attr.y < min.y {min.y = attr.y}
-                if attr.z < min.z {min.z = attr.z}
-                if attr.x > max.x {max.x = attr.x}
-                if attr.y > max.y {max.y = attr.y}
-                if attr.z > max.z {max.z = attr.z}
+                if attr.x < min.x {
+                    min.x = attr.x
+                }
+                if attr.y < min.y {
+                    min.y = attr.y
+                }
+                if attr.z < min.z {
+                    min.z = attr.z
+                }
+                if attr.x > max.x {
+                    max.x = attr.x
+                }
+                if attr.y > max.y {
+                    max.y = attr.y
+                }
+                if attr.z > max.z {
+                    max.z = attr.z
+                }
             }
 
             // from the bounds, we calculate offset and scale,
@@ -101,9 +112,15 @@ fn point_attribute_to_vertex_data_type(
             let (offset, scale) = if !points.is_empty() {
                 let offset = (min + max) / 2.0;
                 let mut scale = (max - min) / 10_000.0;
-                if scale.x < 1.0 { scale.x = 1.0; }
-                if scale.y < 1.0 { scale.y = 1.0; }
-                if scale.z < 1.0 { scale.z = 1.0; }
+                if scale.x < 1.0 {
+                    scale.x = 1.0;
+                }
+                if scale.y < 1.0 {
+                    scale.y = 1.0;
+                }
+                if scale.z < 1.0 {
+                    scale.z = 1.0;
+                }
                 (offset, scale)
             } else {
                 (Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 1.0, 1.0))
@@ -113,41 +130,53 @@ fn point_attribute_to_vertex_data_type(
             let mut values = Vec::with_capacity(points.len());
             for attr in points.view_attribute::<Vector3<f64>>(attribute) {
                 let value = (attr - offset).component_div(&scale);
-                values.push(Vec3F32Attribute::new(value.x as f32, value.y as f32, value.z as f32));
+                values.push(Vec3F32Attribute::new(
+                    value.x as f32,
+                    value.y as f32,
+                    value.z as f32,
+                ));
             }
             VertexData::Vec3F32Transform {
                 values,
                 offset,
-                scale
+                scale,
             }
-        },
+        }
 
         (PointAttributeDataType::Vec3u16, VertexDataType::Vec3F32) => VertexData::Vec3F32(
-            get_point_attribute_vertex_data(points, attribute, |v: Vector3<u16>| Vec3F32Attribute::new(v.x as f32 / 65535.0, v.y as f32 / 65535.0, v.z as f32 / 65535.0))
+            get_point_attribute_vertex_data(points, attribute, |v: Vector3<u16>| {
+                Vec3F32Attribute::new(
+                    v.x as f32 / 65535.0,
+                    v.y as f32 / 65535.0,
+                    v.z as f32 / 65535.0,
+                )
+            }),
         ),
 
-        (PointAttributeDataType::F32, VertexDataType::F32) =>
-            VertexData::F32(
-                get_point_attribute_vertex_data(points, attribute, F32Attribute::new)
-            ),
+        (PointAttributeDataType::F32, VertexDataType::F32) => VertexData::F32(
+            get_point_attribute_vertex_data(points, attribute, F32Attribute::new),
+        ),
 
-        (PointAttributeDataType::F64, VertexDataType::F32) =>
-            VertexData::F32(
-                get_point_attribute_vertex_data(points, attribute, |v: f64| F32Attribute::new(v as f32))
-            ),
+        (PointAttributeDataType::F64, VertexDataType::F32) => VertexData::F32(
+            get_point_attribute_vertex_data(points, attribute, |v: f64| {
+                F32Attribute::new(v as f32)
+            }),
+        ),
 
-        (PointAttributeDataType::U16, VertexDataType::F32) =>
-            VertexData::F32(
-                get_point_attribute_vertex_data(points, attribute, |v: u16| F32Attribute::new(v as f32))
-            ),
+        (PointAttributeDataType::U16, VertexDataType::F32) => VertexData::F32(
+            get_point_attribute_vertex_data(points, attribute, |v: u16| {
+                F32Attribute::new(v as f32)
+            }),
+        ),
 
-        (PointAttributeDataType::U8, VertexDataType::U8) =>
-            VertexData::U8(
-                get_point_attribute_vertex_data(points, attribute, U8Attribute::new)
-            ),
+        (PointAttributeDataType::U8, VertexDataType::U8) => VertexData::U8(
+            get_point_attribute_vertex_data(points, attribute, U8Attribute::new),
+        ),
 
-        (dt, fm) =>
-            panic!("The conversion from the point attribute data type {} to the vertex buffer type {} is not supported.", dt, fm)
+        (dt, fm) => panic!(
+            "The conversion from the point attribute data type {} to the vertex buffer type {} is not supported.",
+            dt, fm
+        ),
     }
 }
 
@@ -162,20 +191,37 @@ pub enum VertexDataType {
 
 /// Contains the data for a vertex buffer.
 /// The enum variants correspond to the different values of [VertexDataType].
-#[derive(Clone, Derivative)]
-#[derivative(Debug)]
+#[derive(Clone)]
 pub enum VertexData {
-    F32(#[derivative(Debug = "ignore")] Vec<F32Attribute>),
-    U8(#[derivative(Debug = "ignore")] Vec<U8Attribute>),
-    Vec3F32(#[derivative(Debug = "ignore")] Vec<Vec3F32Attribute>),
+    F32(Vec<F32Attribute>),
+    U8(Vec<U8Attribute>),
+    Vec3F32(Vec<Vec3F32Attribute>),
     Vec3F32Transform {
         /// position = value * scale + offset
         /// value = (position - offset) / scale
-        #[derivative(Debug = "ignore")]
         values: Vec<Vec3F32Attribute>,
         offset: Vector3<f64>,
         scale: Vector3<f64>,
     },
+}
+
+impl Debug for VertexData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::F32(_) => f.debug_tuple("F32").finish(),
+            Self::U8(_) => f.debug_tuple("U8").finish(),
+            Self::Vec3F32(_) => f.debug_tuple("Vec3F32").finish(),
+            Self::Vec3F32Transform {
+                values: _,
+                offset,
+                scale,
+            } => f
+                .debug_struct("Vec3F32Transform")
+                .field("offset", offset)
+                .field("scale", scale)
+                .finish(),
+        }
+    }
 }
 
 impl std::fmt::Display for VertexDataType {

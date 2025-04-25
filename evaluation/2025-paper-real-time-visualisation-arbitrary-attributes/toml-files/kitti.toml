@@ -1,0 +1,95 @@
+points_file = "../../../data/kitti_sorted.las"
+index_folder = "../../../data/kitti-eval"
+output_file = "../measurements/lidarserv/kitti_%d_%i.json"
+cooldown_seconds = 0
+indexing_timeout_seconds = 50000
+target_point_pressure = 1000000
+
+[attributes]
+Position3D = "Vec3i32"
+Intensity = "U16"
+LASBasicFlags = "U8"
+Classification = "U8"
+ScanAngleRank = "I8"
+UserData = "U8"
+PointSourceID = "U16"
+GpsTime = "F64"
+ColorRGB = "Vec3u16"
+semantic = "U16"
+instance = "U16"
+visible = "U8"
+confidence = "U16"
+# min x y z:                  -2990.515 -3741.836 110.728
+# max x y z:                  4090.455 4076.017 290.353
+
+[queries]
+full-point-cloud = "full"
+classification_building = "attr(semantic == 11)"
+classification_ground = "attr(semantic <= 12)"
+pointsource1 = "attr(35 <= PointSourceID <= 64)"
+pointsource2 = "attr(208 <= PointSourceID <= 248)"
+rgb = "attr(ColorRGB <= [10,10,10])"
+time1 = "attr(199083995.09382153 <= GpsTime <= 466372692.21052635)"
+time2 = "attr(687577131.20366132 <= GpsTime <= 805552832.00000000)"
+
+[coordinate_system]
+scale = [
+    0.001,
+    0.001,
+    0.001,
+]
+offset = [
+    0.0,
+    0.0,
+    0.0,
+]
+
+[indexed_attributes]
+semantic = [
+    "RangeIndex",
+    { SfcIndex = { nr_bins = 16 } },
+]
+pointsourceid = [
+    "RangeIndex",
+]
+colorrgb = [
+    "RangeIndex",
+    { SfcIndex = { nr_bins = 16 } },
+]
+gpstime = [     # todo should probably use attr index for gps time too (and probably more so than for colorrgb???)
+    "RangeIndex",
+]
+
+[defaults]
+measure_index_speed = false
+measure_query_speed = false
+measure_query_latency = false
+node_hierarchy = 19
+point_hierarchy = 11
+priority_function = "NrPointsWeightedByTaskAge"
+num_threads = 32
+cache_size = 500
+nr_bogus_points = [
+    0,
+    0,
+]
+max_lod = 11
+compression = false
+enable_attribute_index = true
+enable_point_filtering = true
+
+[runs.insertion-speed]
+measure_index_speed = true
+compression = [true, false]
+
+[runs.querying]
+measure_query_speed = true
+enable_point_filtering = ["NodeFilteringWithoutAttributeIndex", "NodeFiltering", "PointFiltering"]
+
+[runs.latency]
+measure_query_latency = true
+
+[runs.attr-index]
+measure_index_speed = true
+measure_query_speed = true
+enable_attribute_index = ["All", "RangeIndexOnly", "SfcIndexOnly", "None"]

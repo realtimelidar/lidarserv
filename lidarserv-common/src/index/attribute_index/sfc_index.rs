@@ -1,10 +1,10 @@
-use super::{boolvec::BoolVec, cmp::ComponentwiseCmp, IndexFunction};
+use super::{IndexFunction, boolvec::BoolVec, cmp::ComponentwiseCmp};
 use crate::query::NodeQueryResult;
 use nalgebra::{SVector, Scalar};
-use num_traits::PrimInt;
+use num_traits::{CheckedShr, PrimInt};
 use serde::{Deserialize, Serialize};
 use std::{
-    cmp::{max, Ordering},
+    cmp::{Ordering, max},
     marker::PhantomData,
 };
 
@@ -105,7 +105,7 @@ impl SfcAttribute for f32 {
 impl<T, const D: usize> SfcAttribute for SVector<T, D>
 where
     T: SfcAttribute + Scalar,
-    T::Sfc: Scalar + PrimInt,
+    T::Sfc: Scalar + PrimInt + CheckedShr,
 {
     type Sfc = SVector<T::Sfc, D>;
 
@@ -147,7 +147,9 @@ macro_rules! impl_sfc_int {
         impl Sfc for $t {
             #[inline]
             fn shift(&self, bits: u8) -> Self {
-                (*self) >> bits
+                // todo use unbounded_shr() once the unbounded_shifts feature is stable.
+                // https://github.com/rust-lang/rust/issues/129375
+                self.checked_shr(bits as u32).unwrap_or(0)
             }
 
             #[inline]
@@ -169,13 +171,13 @@ impl_sfc_int!(i64);
 
 impl<T, const D: usize> Sfc for SVector<T, D>
 where
-    T: Scalar + PrimInt,
+    T: Scalar + PrimInt + CheckedShr,
 {
     #[inline]
     fn shift(&self, bits: u8) -> Self {
         self.map(
             #[inline]
-            |c| c >> bits as usize,
+            |c| c.checked_shr(bits as u32).unwrap_or_else(T::zero),
         )
     }
 
@@ -190,7 +192,7 @@ where
 }
 
 /// Used as the node type by the histogram attribute index to accelerate queries.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct SfcIndexNode<R> {
     /// By how many bits have the values in bins been shifted.
     shift: u8,
@@ -310,12 +312,14 @@ where
                     head2.shift(node2_addshift)
                 }
                 (Some((head1, tail1)), Some((head2, tail2))) => {
-                    if head1.interleaved_cmp(head2).is_lt() {
+                    let head1_shifted = head1.shift(node1_addshift);
+                    let head2_shifted = head2.shift(node2_addshift);
+                    if head1_shifted.interleaved_cmp(&head2_shifted).is_lt() {
                         buf1 = tail1;
-                        head1.shift(node1_addshift)
+                        head1_shifted
                     } else {
                         buf2 = tail2;
-                        head2.shift(node2_addshift)
+                        head2_shifted
                     }
                 }
             };
@@ -363,6 +367,7 @@ where
             neg = true;
             if bin.is_eq(&op_bin).all() {
                 pos = true;
+                break;
             }
         }
         query_result(pos, neg)
@@ -379,7 +384,8 @@ where
         for bin in &node.bins {
             pos = true;
             if bin.is_eq(&op_bin).any() {
-                neg = true
+                neg = true;
+                break;
             }
         }
         query_result(pos, neg)
@@ -399,6 +405,9 @@ where
             }
             if bin.is_greater_eq(&op_bin).any() {
                 neg = true;
+            }
+            if pos && neg {
+                break;
             }
         }
         query_result(pos, neg)
@@ -427,6 +436,9 @@ where
             if bin.is_less_eq(&op_bin).any() {
                 neg = true;
             }
+            if pos && neg {
+                break;
+            }
         }
         query_result(pos, neg)
     }
@@ -437,5 +449,114 @@ where
         op: &Self::AttributeValue,
     ) -> crate::query::NodeQueryResult {
         self.test_greater(node, op)
+    }
+
+    fn test_range_inclusive(
+        &self,
+        node: &Self::NodeType,
+        op1: &Self::AttributeValue,
+        op2: &Self::AttributeValue,
+    ) -> NodeQueryResult {
+        let op1_bin = op1.sfc().shift(node.shift);
+        let op2_bin = op2.sfc().shift(node.shift);
+        let mut pos = false;
+        let mut neg = false;
+        for bin in &node.bins {
+            if bin
+                .is_greater_eq(&op1_bin)
+                .and(&bin.is_less_eq(&op2_bin))
+                .all()
+            {
+                pos = true;
+            }
+            if bin
+                .is_less_eq(&op1_bin)
+                .or(&bin.is_greater_eq(&op2_bin))
+                .any()
+            {
+                neg = true;
+            }
+            if pos && neg {
+                break;
+            }
+        }
+        query_result(pos, neg)
+    }
+
+    #[inline]
+    fn test_range_left_inclusive(
+        &self,
+        node: &Self::NodeType,
+        op1: &Self::AttributeValue,
+        op2: &Self::AttributeValue,
+    ) -> NodeQueryResult {
+        self.test_range_inclusive(node, op1, op2)
+    }
+
+    #[inline]
+    fn test_range_right_inclusive(
+        &self,
+        node: &Self::NodeType,
+        op1: &Self::AttributeValue,
+        op2: &Self::AttributeValue,
+    ) -> NodeQueryResult {
+        self.test_range_inclusive(node, op1, op2)
+    }
+
+    #[inline]
+    fn test_range_exclusive(
+        &self,
+        node: &Self::NodeType,
+        op1: &Self::AttributeValue,
+        op2: &Self::AttributeValue,
+    ) -> NodeQueryResult {
+        self.test_range_inclusive(node, op1, op2)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::SfcAttribute;
+
+    #[test]
+    fn test_f32_sfc() {
+        let test_values: &[f32] = &[
+            987654.0,
+            32.123,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -10.123,
+            -1.23,
+            -0.123,
+        ];
+        for v1 in test_values {
+            for v2 in test_values {
+                let expected_result = v1.total_cmp(v2);
+                let actual_result = v1.sfc().cmp(&v2.sfc());
+                assert_eq!(actual_result, expected_result);
+            }
+        }
+    }
+
+    #[test]
+    fn test_f64_sfc() {
+        let test_values: &[f64] = &[
+            987654.0,
+            32.123,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -10.123,
+            -1.23,
+            -0.123,
+        ];
+        for v1 in test_values {
+            for v2 in test_values {
+                let expected_result = v1.total_cmp(v2);
+                let actual_result = v1.sfc().cmp(&v2.sfc());
+                assert_eq!(actual_result, expected_result);
+            }
+        }
     }
 }

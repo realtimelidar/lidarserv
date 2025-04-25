@@ -4,16 +4,18 @@ use clap::Parser;
 use cli::EvaluationOptions;
 use converter::{ConvertingPointReader, MissingAttributesStrategy};
 use git_version::git_version;
+use indexmap::IndexMap;
 use indicatif::MultiProgress;
 use indicatif_log_bridge::LogWrapper;
 use insertion_rate::measure_insertion_rate;
+use itertools::Itertools;
 use latency::measure_latency;
 use lidarserv_common::{
     geometry::{
         coordinate_system::CoordinateSystem,
         grid::{GridHierarchy, LodLevel},
     },
-    index::{Octree, OctreeParams},
+    index::{Octree, OctreeParams, attribute_index::config::IndexKind, reader::QueryConfig},
 };
 use lidarserv_server::index::query::Query;
 use log::{debug, error, info, warn};
@@ -23,8 +25,11 @@ use pasture_io::{
     las::LASReader,
 };
 use query_performance::measure_one_query;
-use serde_json::{json, Value};
-use settings::{Base, EvaluationScript, EvaluationSettings, MultiIndex, SingleIndex};
+use serde_json::{Value, json};
+use settings::{
+    Base, ElevationRun, EnabledAttributeIndexes, EvaluationScript, EvaluationSettings, MultiIndex,
+    QueryFiltering, SingleIndex,
+};
 use simple_logger::SimpleLogger;
 use std::{
     collections::HashMap,
@@ -102,7 +107,17 @@ fn main_result(args: EvaluationOptions) -> Result<(), anyhow::Error> {
             "Creating example config file at: {}",
             args.input_file.display()
         );
-        let default_config = EvaluationScript::default();
+        let mut default_config = EvaluationScript::default();
+        if !args.run.is_empty() {
+            let mut runs_from_preset = default_config.runs.into_values();
+            default_config.runs = IndexMap::new();
+            for name in &args.run {
+                let run = runs_from_preset
+                    .next()
+                    .unwrap_or_else(ElevationRun::default);
+                default_config.runs.insert(name.clone(), run);
+            }
+        }
         let mut file = File::create_new(&args.input_file)?;
         file.write_all(toml::to_string_pretty(&default_config)?.as_bytes())?;
         return Ok(());
@@ -133,11 +148,27 @@ fn main_result(args: EvaluationOptions) -> Result<(), anyhow::Error> {
     let out_file_name = get_output_filename(&config.base)?;
     let out_file = std::fs::File::create(&out_file_name)?;
 
+    // determine which runs to execute
+    let enabled_runs = if args.run.is_empty() {
+        config.runs.iter().collect_vec()
+    } else {
+        let mut enabled_runs = Vec::new();
+        for name in &args.run {
+            if let Some(entry) = config.runs.get_key_value(name) {
+                enabled_runs.push(entry)
+            } else {
+                return Err(anyhow!("The run '{name}' is not defined in the toml file."));
+            }
+        }
+        enabled_runs
+    };
+
     // run tests
     info!("Running tests");
     let started_at = Utc::now();
+    let mut last_index = None;
     let mut all_results = HashMap::new();
-    for (name, run) in &config.runs {
+    for (name, run) in enabled_runs {
         info!("=== {} ===", name);
         let mut run = run.clone();
         run.index.apply_defaults(&config.defaults.index);
@@ -148,7 +179,8 @@ fn main_result(args: EvaluationOptions) -> Result<(), anyhow::Error> {
         for index in &run.index {
             info!("--- {name} run {current_run} ---");
             prettyprint_index_run(&run.index, &index);
-            let result = match evaluate(&index, &config.base, settings.clone()) {
+            let result = match evaluate(&index, &config.base, settings.clone(), last_index.as_ref())
+            {
                 Ok(o) => o,
                 Err(e) => {
                     error!("Evaluation run finished with an error: {e}");
@@ -163,6 +195,7 @@ fn main_result(args: EvaluationOptions) -> Result<(), anyhow::Error> {
                 "index": index,
                 "results": result,
             }));
+            last_index = Some(index.clone());
             current_run += 1;
         }
         all_results.insert(name, run_results);
@@ -219,7 +252,9 @@ pub fn processor_cooldown(base_config: &Base) {
     }
 }
 
-fn open_input_file(base_config: &Base) -> Result<impl PointReader + SeekToPoint, anyhow::Error> {
+fn open_input_file(
+    base_config: &Base,
+) -> Result<impl PointReader + SeekToPoint + Send + use<>, anyhow::Error> {
     // open input file
     let raw_input_file = LASReader::from_path(base_config.points_file_absolute(), true)?;
     let trans = raw_input_file.header().transforms();
@@ -242,13 +277,31 @@ fn open_input_file(base_config: &Base) -> Result<impl PointReader + SeekToPoint,
 fn create_index(index_config: &SingleIndex, base_config: &Base) -> Result<Octree, anyhow::Error> {
     let point_layout = base_config.attributes.point_layout();
     let coordinate_system = base_config.coordinate_system;
-    let attribute_indexes = if index_config.enable_attribute_index {
-        base_config.attribute_indexes()
-    } else {
-        vec![]
+    let all_attribute_indexes = base_config.attribute_indexes();
+    let attribute_indexes = match index_config.enable_attribute_index {
+        EnabledAttributeIndexes::All => all_attribute_indexes,
+        EnabledAttributeIndexes::RangeIndexOnly => all_attribute_indexes
+            .into_iter()
+            .filter(|idx| idx.index == IndexKind::RangeIndex)
+            .collect(),
+        EnabledAttributeIndexes::SfcIndexOnly => all_attribute_indexes
+            .into_iter()
+            .filter(|idx| matches!(idx.index, IndexKind::SfcIndex(_)))
+            .collect(),
+        EnabledAttributeIndexes::None => vec![],
     };
-    if index_config.enable_attribute_index && attribute_indexes.is_empty() {
-        warn!("Attribute indexing is enabled, but no indexed attributes are configured.");
+    if attribute_indexes.is_empty() {
+        match index_config.enable_attribute_index {
+            EnabledAttributeIndexes::All => {
+                warn!("Attribute indexing is enabled, but no indexed attributes are configured.")
+            }
+            EnabledAttributeIndexes::RangeIndexOnly | EnabledAttributeIndexes::SfcIndexOnly => {
+                warn!(
+                    "Attribute indexing is enabled, but no indexed attributes are configured with the selected index type."
+                )
+            }
+            EnabledAttributeIndexes::None => (),
+        }
     }
 
     // Create index
@@ -277,6 +330,7 @@ fn evaluate(
     index_config: &SingleIndex,
     base_config: &Base,
     settings: EvaluationSettings,
+    last_index_config: Option<&SingleIndex>,
 ) -> Result<Value, anyhow::Error> {
     let unwind_result = catch_unwind(|| {
         // measure insertion rate
@@ -314,6 +368,12 @@ fn evaluate(
                 processor_cooldown(base_config);
                 info!("Measuring query latency... [{query_name}]");
                 let query = Query::parse(query_str)?;
+                let query_config = QueryConfig {
+                    enable_attribute_index: index_config.enable_point_filtering
+                        != QueryFiltering::NodeFilteringWithoutAttributeIndex,
+                    enable_point_filtering: index_config.enable_point_filtering
+                        == QueryFiltering::PointFiltering,
+                };
                 let mut index = create_index(index_config, base_config)?;
                 let mut input_file = open_input_file(base_config)?;
                 input_file.seek_point(SeekFrom::Start(0))?;
@@ -321,6 +381,7 @@ fn evaluate(
                     &mut index,
                     &mut input_file,
                     query,
+                    query_config,
                     base_config.latency_replay_pps,
                     base_config.latency_sample_pps,
                 )?;
@@ -336,38 +397,38 @@ fn evaluate(
         // measure query performance
         let mut result_query_perf = serde_json::Value::Null;
         if settings.measure_query_speed {
+            // (re) create the index if needed
             if !settings.measure_index_speed
                 && (!settings.measure_query_latency || base_config.queries.is_empty())
             {
-                let directory_file = base_config.index_folder_absolute().join("directory.bin");
-                if directory_file.exists() {
-                    warn!(
-                        "The query performance test is running with an already-existing index. \
-                        There is no guarantee that this index was created with the same settings \
-                        as specified in the toml file. This might lead to unexpected results, \
-                        or even crashes in some cases. If you want a new index to be \
-                        created automatically, set `measure_index_speed` to `true` in the toml file."
-                    )
+                if last_index_config.is_some_and(|l| !l.needs_reindexing(index_config)) {
+                    info!("Keeping last index without reindexing.");
                 } else {
-                    warn!(
-                        "The query performance test is running without creating an index first. \
-                        Make sure there is a valid index at `{}`. \
-                        If you want an index to be created automatically, set \
-                        `measure_index_speed` to `true` in the toml file.",
-                        base_config.index_folder_absolute().display()
-                    );
-                    return Err(anyhow!(
-                        "Missing index at `{}`.",
-                        base_config.index_folder_absolute().display()
-                    ));
+                    info!("Recreating index before querying.");
+                    reset_data_folder(base_config)?;
+                    let mut index = create_index(index_config, base_config)?;
+                    let mut input_file = open_input_file(base_config)?;
+                    input_file.seek_point(SeekFrom::Start(0))?;
+                    measure_insertion_rate(
+                        // measure_insertion_rate is the fastest way to create the index,
+                        // as it replays the data as fast as possible.
+                        &mut index,
+                        &mut input_file,
+                        1_000_000,
+                        None,
+                    )?;
+                    index.flush()?;
                 }
             }
+
+            // Here comes the actual query performance test
             let mut index = create_index(index_config, base_config)?;
             let mut query_perf_results = HashMap::new();
             for (query_name, query) in &base_config.queries {
                 processor_cooldown(base_config);
                 info!("Measuring query perf: {query_name}: {query}");
-                let sensorpos_query_perf = measure_one_query(&mut index, query, index_config.enable_point_filtering);
+                let sensorpos_query_perf =
+                    measure_one_query(&mut index, query, index_config.enable_point_filtering);
                 query_perf_results.insert(query_name.clone(), sensorpos_query_perf);
             }
             let result = json!(query_perf_results);
@@ -390,15 +451,13 @@ fn evaluate(
 
     match unwind_result {
         Ok(o) => o,
-        Err(e) => {
-            if let Some(e) = e.downcast_ref::<String>() {
-                Err(anyhow!("Panick! ({e})"))
-            } else if let Some(e) = e.downcast_ref::<&str>() {
-                Err(anyhow!("Panick! ({e})"))
-            } else {
-                Err(anyhow!("Panick!"))
-            }
-        }
+        Err(e) => match e.downcast_ref::<String>() {
+            Some(e) => Err(anyhow!("Panick! ({e})")),
+            _ => match e.downcast_ref::<&str>() {
+                Some(e) => Err(anyhow!("Panick! ({e})")),
+                _ => Err(anyhow!("Panick!")),
+            },
+        },
     }
 }
 

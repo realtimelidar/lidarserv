@@ -3,7 +3,8 @@ use std::{any::Any, fmt::Display};
 use anyhow::anyhow;
 use lidarserv_common::geometry::coordinate_system::CoordinateSystem;
 use lidarserv_input_file::extractors::{
-    basic_flags::LasBasicFlagsExtractor, basic_flags_downgrade::LasBasicFlagsDowngradeExtractor,
+    AttributeExtractor, basic_flags::LasBasicFlagsExtractor,
+    basic_flags_downgrade::LasBasicFlagsDowngradeExtractor,
     classification_flags::ClassificationFlagsExtractor, copy::CopyExtractor,
     edge_of_flight_line::EdgeOfFlightLineExtractor, extended_flags::LasExtendedFlagsExtractor,
     extended_flags_upgrade::LasExtendedFlagsUpgradeExtractor, init_zero::InitZeroExtractor,
@@ -12,7 +13,6 @@ use lidarserv_input_file::extractors::{
     return_number_3bit::ReturnNumber3BitExtractor, return_number_4bit::ReturnNumber4BitExtractor,
     scan_angle::ScanAngleExtractor, scan_angle_rank::ScanAngleRankExtractor,
     scan_direction_flag::ScanDirectionFlagExtractor, scanner_channel::ScannerChannelExtractor,
-    AttributeExtractor,
 };
 use log::warn;
 use pasture_core::{
@@ -31,7 +31,7 @@ pub enum MissingAttributesStrategy {
 }
 
 pub struct Converter {
-    extractors: Vec<Box<dyn AttributeExtractor>>,
+    extractors: Vec<Box<dyn AttributeExtractor + Send>>,
 }
 
 impl Converter {
@@ -42,7 +42,7 @@ impl Converter {
         dst_coordinate_system: CoordinateSystem,
         missing_attributes: MissingAttributesStrategy,
     ) -> Result<Self, anyhow::Error> {
-        let mut extractors: Vec<Box<dyn AttributeExtractor>> = Vec::new();
+        let mut extractors: Vec<Box<dyn AttributeExtractor + Send>> = Vec::new();
         let dst_point_size = dst_layout.size_of_point_entry() as usize;
 
         for dst_attribute in dst_layout.attributes() {
@@ -189,7 +189,7 @@ impl Converter {
                     return Err(anyhow::anyhow!(
                         "Missing attribute: {}",
                         dst_attribute.attribute_definition()
-                    ))
+                    ));
                 }
             }
         }

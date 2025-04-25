@@ -5,23 +5,24 @@ use pasture_core::{
     layout::{PointAttributeDataType, PointAttributeDefinition, PrimitiveType},
 };
 use range_index::RangeIndex;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sfc_index::SfcIndex;
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     fs::File,
+    io::{BufReader, BufWriter},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
 use crate::{
     geometry::grid::LeveledGridCell,
     query::{
-        attribute::{AttributeQuery, TestFunction, TestFunctionDyn},
         NodeQueryResult,
+        attribute::{AttributeQuery, TestFunction, TestFunctionDyn},
     },
 };
 
@@ -37,7 +38,7 @@ pub trait IndexFunction {
 
     /// Creates a node "containing" the given attribute values.
     fn index(&self, attribute_values: impl Iterator<Item = Self::AttributeValue>)
-        -> Self::NodeType;
+    -> Self::NodeType;
 
     /// Merges two nodes into one.
     /// The resulting node should "contain" all attribute values of both input nodes.
@@ -79,6 +80,61 @@ pub trait IndexFunction {
     /// For non-scalar attributes, ALL components need to be larger or equal to the operand components.
     /// Note that this is different from not(test_less), which would match if ANY of the components are larger or equal.
     fn test_greater_eq(&self, node: &Self::NodeType, op: &Self::AttributeValue) -> NodeQueryResult;
+
+    /// Tests, if points in the node are within the given range. (inclusive version)
+    ///
+    /// For non-scalar attributes, ALL components need to be in the given range.
+    #[inline]
+    fn test_range_inclusive(
+        &self,
+        node: &Self::NodeType,
+        op1: &Self::AttributeValue,
+        op2: &Self::AttributeValue,
+    ) -> NodeQueryResult {
+        self.test_greater_eq(node, op1)
+            .and(self.test_less_eq(node, op2))
+    }
+
+    /// Tests, if points in the node are within the given range. (left-inclusive, right-exclusive version)
+    ///
+    /// For non-scalar attributes, ALL components need to be in the given range.
+    #[inline]
+    fn test_range_left_inclusive(
+        &self,
+        node: &Self::NodeType,
+        op1: &Self::AttributeValue,
+        op2: &Self::AttributeValue,
+    ) -> NodeQueryResult {
+        self.test_greater_eq(node, op1)
+            .and(self.test_less(node, op2))
+    }
+
+    /// Tests, if points in the node are within the given range. (left-exclusive, right-inclusive inclusive version)
+    ///
+    /// For non-scalar attributes, ALL components need to be in the given range.
+    #[inline]
+    fn test_range_right_inclusive(
+        &self,
+        node: &Self::NodeType,
+        op1: &Self::AttributeValue,
+        op2: &Self::AttributeValue,
+    ) -> NodeQueryResult {
+        self.test_greater(node, op1)
+            .and(self.test_less_eq(node, op2))
+    }
+
+    /// Tests, if points in the node are within the given range. (exclusive version)
+    ///
+    /// For non-scalar attributes, ALL components need to be in the given range.
+    #[inline]
+    fn test_range_exclusive(
+        &self,
+        node: &Self::NodeType,
+        op1: &Self::AttributeValue,
+        op2: &Self::AttributeValue,
+    ) -> NodeQueryResult {
+        self.test_greater(node, op1).and(self.test_less(node, op2))
+    }
 }
 
 struct NodeManager<Idx, Node> {
@@ -120,8 +176,8 @@ where
     }
 
     pub fn load(index: Idx, path: PathBuf) -> Result<Self, AttributeIndexError> {
-        let read = File::open(&path)?;
-        let content: NodesFile<Node> = match ciborium::from_reader(&read) {
+        let mut read = BufReader::new(File::open(&path)?);
+        let content: NodesFile<Node> = match ciborium::from_reader(&mut read) {
             Ok(o) => o,
             Err(ciborium::de::Error::Io(io_err)) => return Err(AttributeIndexError::Io(io_err)),
             Err(_) => return Err(AttributeIndexError::Corrupt(path)),
@@ -211,35 +267,32 @@ where
         let test = test.convert_to::<Idx::AttributeValue>();
 
         let nodes = self.nodes.read().unwrap();
-        if let Some(node) = nodes.get(cell) {
-            let node_lock = node.lock().unwrap();
+        match nodes.get(cell) {
+            Some(node) => {
+                let node_lock = node.lock().unwrap();
 
-            match test {
-                TestFunction::Eq(o) => self.index.test_eq(&node_lock, o),
-                TestFunction::Neq(o) => self.index.test_neq(&node_lock, o),
-                TestFunction::Less(o) => self.index.test_less(&node_lock, o),
-                TestFunction::LessEq(o) => self.index.test_less_eq(&node_lock, o),
-                TestFunction::Greater(o) => self.index.test_greater(&node_lock, o),
-                TestFunction::GreaterEq(o) => self.index.test_greater_eq(&node_lock, o),
-                TestFunction::RangeExclusive(o, p) => self
-                    .index
-                    .test_greater(&node_lock, o)
-                    .and(self.index.test_less(&node_lock, p)),
-                TestFunction::RangeLeftInclusive(o, p) => self
-                    .index
-                    .test_greater_eq(&node_lock, o)
-                    .and(self.index.test_less(&node_lock, p)),
-                TestFunction::RangeRightInclusive(o, p) => self
-                    .index
-                    .test_greater(&node_lock, o)
-                    .and(self.index.test_less_eq(&node_lock, p)),
-                TestFunction::RangeAllInclusive(o, p) => self
-                    .index
-                    .test_greater_eq(&node_lock, o)
-                    .and(self.index.test_less_eq(&node_lock, p)),
+                match test {
+                    TestFunction::Eq(o) => self.index.test_eq(&node_lock, o),
+                    TestFunction::Neq(o) => self.index.test_neq(&node_lock, o),
+                    TestFunction::Less(o) => self.index.test_less(&node_lock, o),
+                    TestFunction::LessEq(o) => self.index.test_less_eq(&node_lock, o),
+                    TestFunction::Greater(o) => self.index.test_greater(&node_lock, o),
+                    TestFunction::GreaterEq(o) => self.index.test_greater_eq(&node_lock, o),
+                    TestFunction::RangeExclusive(o, p) => {
+                        self.index.test_range_exclusive(&node_lock, o, p)
+                    }
+                    TestFunction::RangeLeftInclusive(o, p) => {
+                        self.index.test_range_left_inclusive(&node_lock, o, p)
+                    }
+                    TestFunction::RangeRightInclusive(o, p) => {
+                        self.index.test_range_right_inclusive(&node_lock, o, p)
+                    }
+                    TestFunction::RangeAllInclusive(o, p) => {
+                        self.index.test_range_inclusive(&node_lock, o, p)
+                    }
+                }
             }
-        } else {
-            NodeQueryResult::Negative
+            _ => NodeQueryResult::Negative,
         }
     }
 
@@ -258,12 +311,13 @@ where
             }
         };
         let write = File::create(&self.path)?;
-        match ciborium::into_writer(&contents, &write) {
+        let mut write = BufWriter::new(write);
+        match ciborium::into_writer(&contents, &mut write) {
             Ok(_) => (),
             Err(ciborium::ser::Error::Io(io_err)) => return Err(AttributeIndexError::Io(io_err)),
             Err(_) => return Err(AttributeIndexError::Corrupt(self.path.clone())),
         };
-        write.sync_all()?;
+        write.into_inner().map_err(|e| e.into_error())?.sync_all()?;
         Ok(())
     }
 }
@@ -306,7 +360,7 @@ impl AttributeIndex {
         path: PathBuf,
     ) -> Result<(), AttributeIndexError> {
         macro_rules! add_index_common_attr_types {
-            ($attribute:expr, $path:expr, $makeidx:expr) => {{
+            ($attribute:expr_2021, $path:expr_2021, $makeidx:expr_2021) => {{
                 let attribute = $attribute;
                 let path = $path;
                 match attribute.datatype() {
