@@ -230,10 +230,30 @@ where
         }
 
         // overwrite header with actual message size
-        let len = data.len() as u64;
+        let len: u64 = {
+            if let Some(DeviceType::Viewer) = self.dev_type {
+                info!("Full message length: {}", data.len());
+                info!("Header length: {}", header_len);
+                let tmp: u64;
+                tmp = (data.len() as u64 & 0xffffffff) | ((header_len as u64) << 32);
+                tmp
+            } else {
+                data.len() as u64
+            }
+        };
         let len_bytes = len.to_le_bytes();
         data[0..HEADER_SIZE].copy_from_slice(&len_bytes);
         drop(_s2);
+
+        info!("Message len: {:?}, {:?}", len, len_bytes);
+
+        if payload.len() > 0 {
+            println!("Payload bytes = ");
+            for byte in payload.iter().take(18) {
+                print!("{:02x} ", byte);
+            }
+            println!();
+        }
 
         // send
         let _ = span!("Connection::write_message before write");
